@@ -1,0 +1,238 @@
+# Аимлок для iPhone (Free Fire / FF Max) с расширенным антибаном
+# Привязка к кнопке: автоматический захват головы при удержании назначенной кнопки.
+# Встроены меры маскировки для снижения риска обнаружения.
+# Требуется: джейлбрейк, Pythonista + PyObjC, доступ к приватному фреймворку GraphicsServices.
+
+import time
+import threading
+import random
+import math
+import Quartz
+import cv2
+import numpy as np
+from ctypes import CDLL, c_int, c_float, Structure, pointer, byref
+import objc
+
+# ========== НАСТРОЙКИ ==========
+LOWER_HSV = np.array([0, 60, 60])       # Нижняя граница цвета головы (красноватый оттенок)
+UPPER_HSV = np.array([8, 255, 255])     # Верхняя граница
+SCREEN_WIDTH = 375                      # Ширина экрана в точках (iPhone 6/7/8)
+SCREEN_HEIGHT = 667                     # Высота экрана в точках
+
+# АНТИБАН: параметры рандомизации
+TRACK_INTERVAL = 0.05                   # Базовая задержка между проверками (сек), будет ±30%
+STICKY_FACTOR = 0.30                    # Базовый коэффициент плавности прилипания (0 – мгновенно, 1 – очень плавно)
+JITTER_MAX = 3                          # Максимальный случайный сдвиг координат (пикселей)
+SKIP_PROBABILITY = 0.12                 # Вероятность пропуска кадра (имитация человеческой рассеянности)
+NECK_AIM_CHANCE = 0.15                  # Вероятность направить на шею/грудь вместо головы
+HUMAN_DRAG_STEPS = 7                    # Минимальное количество промежуточных шагов при drag
+
+# АНТИБАН: защита от анализа поведения
+MAX_HEADSHOTS_IN_ROW = 5               # Максимальное число выстрелов в голову подряд перед принудительным пропуском
+COOLDOWN_AFTER_HEADSHOTS = 2.0          # Секунд перерыва после серии хэдшотов
+SESSION_LIMIT = 45 * 60                 # Максимальное время работы (сек), затем автоотключение на 5 мин
+REST_TIME = 5 * 60                      # Длительность отдыха
+
+# Глобальные счётчики и состояния
+running = True
+aimlock_active = False
+last_head_pos = (SCREEN_WIDTH//2, SCREEN_HEIGHT//3)
+headshot_counter = 0
+session_start = time.time()
+cooldown_until = 0.0
+
+# ========== ЗАХВАТ ЭКРАНА ==========
+def capture_screen():
+    region = Quartz.CGRectInfinite
+    img_ref = Quartz.CGWindowListCreateImage(
+        region,
+        Quartz.kCGWindowListOptionOnScreenOnly,
+        Quartz.kCGNullWindowID,
+        Quartz.kCGWindowImageDefault)
+    width = Quartz.CGImageGetWidth(img_ref)
+    height = Quartz.CGImageGetHeight(img_ref)
+    provider = Quartz.CGImageGetDataProvider(img_ref)
+    data = Quartz.CGDataProviderCopyData(provider)
+    bytes_per_row = Quartz.CGImageGetBytesPerRow(img_ref)
+    np_data = np.frombuffer(data, dtype=np.uint8)
+    np_data = np_data.reshape(height, bytes_per_row // 4, 4)
+    frame = np_data[:, :SCREEN_WIDTH*4].reshape(height, SCREEN_WIDTH, 4)
+    frame = frame[:, :, :3]  # RGB
+    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    return frame
+
+# ========== ПОИСК ГОЛОВЫ С ЭЛЕМЕНТАМИ АНТИБАНА ==========
+def find_head_antiban(frame):
+    # Случайное изменение цветового фильтра (небольшое, чтобы не сломать детект)
+    l_h = max(0, LOWER_HSV[0] + random.randint(-2, 2))
+    u_h = min(180, UPPER_HSV[0] + random.randint(-2, 2))
+    lower = np.array([l_h, LOWER_HSV[1], LOWER_HSV[2]])
+    upper = np.array([u_h, UPPER_HSV[1], UPPER_HSV[2]])
+
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, lower, upper)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+    mask = cv2.erode(mask, kernel, iterations=1)
+    mask = cv2.dilate(mask, kernel, iterations=2)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    # Находим ближайшую к текущему положению пальца
+    cx, cy = last_head_pos
+    best = None
+    min_dist = float('inf')
+    for cnt in contours:
+        if cv2.contourArea(cnt) < 30:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        head_center = (x + w//2, y + h//5)
+        dist = (head_center[0] - cx)**2 + (head_center[1] - cy)**2
+        if dist < min_dist:
+            min_dist = dist
+            best = head_center
+    return best
+
+# ========== ОТПРАВКА КАСАНИЯ С ИМИТАЦИЕЙ DRAG ==========
+def inject_touch(from_x, from_y, to_x, to_y, steps=None):
+    """
+    Эмулирует жест перетаскивания с заданным числом промежуточных шагов.
+    Использует приватный фреймворк GraphicsServices для низкоуровневой инъекции событий.
+    """
+    if steps is None:
+        steps = random.randint(HUMAN_DRAG_STEPS, HUMAN_DRAG_STEPS + 3)
+
+    gs = CDLL('/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices')
+    class GSTouch(Structure):
+        _fields_ = [
+            ("x", c_float),
+            ("y", c_float),
+            ("phase", c_int),       # 0 = began, 1 = moved, 2 = stationary, 3 = ended
+            ("touchID", c_int),
+            ("timestamp", c_float)
+        ]
+
+    # Начало касания
+    touch_start = GSTouch(c_float(from_x), c_float(from_y), 0, 0, 0.0)
+    gs.GSEventInjectTouches(pointer((GSTouch * 1)(touch_start)), 1, 0)
+
+    # Плавное перемещение с неравномерным ускорением (человеческий фактор)
+    for i in range(1, steps + 1):
+        # Кривая скорости: то быстро, то медленно (синусоида с шумом)
+        frac = i / steps
+        # Нелинейность: иногда замедляемся в середине
+        if random.random() < 0.3:
+            frac = math.pow(frac, 1.2 + random.uniform(-0.2, 0.2))
+        # Вычисляем промежуточные координаты
+        inter_x = from_x + (to_x - from_x) * frac
+        inter_y = from_y + (to_y - from_y) * frac
+        touch_move = GSTouch(c_float(inter_x), c_float(inter_y), 1, 0, 0.0)
+        gs.GSEventInjectTouches(pointer((GSTouch * 1)(touch_move)), 1, 0)
+        time.sleep(0.001 + random.uniform(0, 0.002))  # Неравномерная задержка
+
+    # Завершение касания
+    touch_end = GSTouch(c_float(to_x), c_float(to_y), 3, 0, 0.0)
+    gs.GSEventInjectTouches(pointer((GSTouch * 1)(touch_end)), 1, 0)
+
+# ========== ЛОГИКА УПРАВЛЕНИЯ СЕССИЕЙ И ОГРАНИЧЕНИЯМИ ==========
+def apply_session_limits():
+    global session_start, cooldown_until
+    elapsed = time.time() - session_start
+    if elapsed > SESSION_LIMIT:
+        print("[АНТИБАН] Лимит сессии достигнут. Принудительный отдых.")
+        cooldown_until = time.time() + REST_TIME
+        session_start = time.time()  # сброс таймера после отдыха
+
+# ========== ГЛАВНЫЙ ЦИКЛ С УЛУЧШЕННЫМ АНТИБАНОМ ==========
+def aim_loop():
+    global running, aimlock_active, last_head_pos, headshot_counter, cooldown_until
+    while running:
+        now = time.time()
+        # Проверка периода принудительного отдыха
+        if cooldown_until > now:
+            time.sleep(1)
+            continue
+
+        if aimlock_active:
+            # Случайная задержка между итерациями
+            delay = TRACK_INTERVAL * random.uniform(0.7, 1.3)
+            time.sleep(delay)
+
+            # Случайный пропуск кадра
+            if random.random() < SKIP_PROBABILITY:
+                continue
+
+            frame = capture_screen()
+            target = find_head_antiban(frame)
+
+            if target is not None:
+                # Проверка лимита хэдшотов
+                if headshot_counter >= MAX_HEADSHOTS_IN_ROW:
+                    print("[АНТИБАН] Серия хэдшотов, отдых.")
+                    cooldown_until = now + COOLDOWN_AFTER_HEADSHOTS
+                    headshot_counter = 0
+                    continue
+
+                # Случайное смещение прицела в область шеи/груди
+                if random.random() < NECK_AIM_CHANCE:
+                    offset_y = random.randint(15, 25)  # Смещаем вниз (шея)
+                else:
+                    offset_y = 0
+
+                jitter_x = random.randint(-JITTER_MAX, JITTER_MAX)
+                jitter_y = random.randint(-JITTER_MAX, JITTER_MAX) + offset_y
+                target_x = target[0] + jitter_x
+                target_y = target[1] + jitter_y
+
+                # Плавность с небольшим случайным изменением sticky-фактора
+                sticky = STICKY_FACTOR * random.uniform(0.8, 1.2)
+                curr_x, curr_y = last_head_pos
+                new_x = curr_x + (target_x - curr_x) * (1 - sticky)
+                new_y = curr_y + (target_y - curr_y) * (1 - sticky)
+
+                # Инъекция жеста перетаскивания
+                inject_touch(curr_x, curr_y, new_x, new_y)
+
+                # Обновление позиции и счётчика (если попали в голову)
+                last_head_pos = (new_x, new_y)
+                if offset_y == 0:  # Только чистая голова увеличивает счётчик
+                    headshot_counter += 1
+                else:
+                    headshot_counter = max(0, headshot_counter - 1)  # Сброс при промахе
+
+            else:
+                # Нет цели — оставляем палец на месте, но иногда сбрасываем счётчик хэдшотов
+                if random.random() < 0.1:
+                    headshot_counter = 0
+
+            # Проверка лимита сессии
+            apply_session_limits()
+
+        else:
+            # Если аимлок не активен, снижаем нагрузку и сбрасываем счётчики
+            headshot_counter = 0
+            time.sleep(0.1)
+
+# ========== ЗАПУСК ==========
+if __name__ == "__main__":
+    print("Аимлок с глубоким антибаном активирован.")
+    print("Для работы требуется привязка к аппаратной кнопке (см. комментарии в коде).")
+    # Для теста без кнопки используем toggle через глобальную переменную.
+    # Реальная активация — через твик Activator с вызовом функции переключения aimlock_active.
+    aim_thread = threading.Thread(target=aim_loop, daemon=True)
+    aim_thread.start()
+
+    # Пример симуляции активации (убрать в боевой версии):
+    def dummy_activation():
+        global aimlock_active
+        while True:
+            aimlock_active = not aimlock_active
+            time.sleep(10)
+    # threading.Thread(target=dummy_activation, daemon=True).start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        running = False
+        print("Аимлок остановлен.")
