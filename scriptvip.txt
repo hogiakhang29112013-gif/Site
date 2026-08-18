@@ -1,0 +1,380 @@
+-- Evade Full Suite (Mobile & PC Cross-Platform Edition)
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Stats = game:GetService("Stats")
+local RunService = game:GetService("RunService")
+local ScriptContext = game:GetService("ScriptContext")
+local GuiService = game:GetService("GuiService")
+local TeleportService = game:GetService("TeleportService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local LocalPlayer = Players.LocalPlayer
+
+-- Check thiết bị Mobile / PC
+local IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-- CHỐNG AFK & VĂNG SERVER
+pcall(function()
+    ScriptContext.Error:Connect(function() return true end)
+    local gc = getconnections or get_signal_cons
+    if gc then
+        for _, conn in pairs(gc(LocalPlayer.Idled)) do 
+            if conn.Disable then conn:Disable() end 
+        end
+    end
+    GuiService.ErrorMessageChanged:Connect(function()
+        pcall(function()
+            GuiService:ClearError()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+        end)
+    end)
+    task.spawn(function()
+        while task.wait(60) do collectgarbage("collect") end
+    end)
+end)
+
+-- Quản lý UI Parent
+local TargetParent = nil
+pcall(function() TargetParent = game:GetService("CoreGui") end)
+if not TargetParent or not pcall(function() return TargetParent.Name end) then
+    TargetParent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+if TargetParent:FindFirstChild("EvadeCrossPlatformUI") then
+    TargetParent.EvadeCrossPlatformUI:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "EvadeCrossPlatformUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = TargetParent
+
+-- Nút Bật/Tắt Menu Dạng Tròn (Dễ Bấm Trên Mobile)
+local ToggleBtn = Instance.new("TextButton", ScreenGui)
+ToggleBtn.Size = IsMobile and UDim2.new(0, 50, 0, 50) or UDim2.new(0, 45, 0, 45)
+ToggleBtn.Position = UDim2.new(0.02, 0, 0.25, 0)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(180, 0, 0)
+ToggleBtn.Text = "MENU"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Font = Enum.Font.SourceSansBold
+ToggleBtn.TextSize = IsMobile and 12 or 14
+ToggleBtn.Active = true
+ToggleBtn.Draggable = true
+
+local UICornerBtn = Instance.new("UICorner", ToggleBtn)
+UICornerBtn.CornerRadius = UDim.new(1, 0)
+
+-- Khung Main Menu (Tự Động Co Co Co Theo Màn Hình)
+local MainFrame = Instance.new("Frame", ScreenGui)
+MainFrame.Size = IsMobile and UDim2.new(0, 250, 0, 380) or UDim2.new(0, 270, 0, 460)
+MainFrame.Position = UDim2.new(0.12, 0, 0.10, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+MainFrame.ClipsDescendants = true
+MainFrame.Active = true
+MainFrame.Draggable = true
+
+local UICornerFrame = Instance.new("UICorner", MainFrame)
+UICornerFrame.CornerRadius = UDim.new(0, 8)
+
+-- Ảnh Nền Tần Thủy Hoàng
+local MenuImage = Instance.new("ImageLabel", MainFrame)
+MenuImage.Size = UDim2.new(1, 0, 1, 0)
+MenuImage.Image = "rbxassetid://14424117781"
+MenuImage.BackgroundTransparency = 1
+MenuImage.ImageTransparency = 0.5
+MenuImage.ScaleType = Enum.ScaleType.Crop
+MenuImage.ZIndex = 0
+
+ToggleBtn.MouseButton1Click:Connect(function()
+    MainFrame.Visible = not MainFrame.Visible
+end)
+
+local Title = Instance.new("TextLabel", MainFrame)
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.BackgroundColor3 = Color3.fromRGB(30, 0, 0)
+Title.BackgroundTransparency = 0.2
+Title.Text = "EVADE - CROSS PLATFORM"
+Title.TextColor3 = Color3.fromRGB(255, 215, 0)
+Title.TextSize = IsMobile and 12 or 13
+Title.Font = Enum.Font.SourceSansBold
+Title.ZIndex = 2
+
+local StatsLabel = Instance.new("TextLabel", MainFrame)
+StatsLabel.Size = UDim2.new(1, 0, 0, 22)
+StatsLabel.Position = UDim2.new(0, 0, 0, 30)
+StatsLabel.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+StatsLabel.BackgroundTransparency = 0.4
+StatsLabel.Text = "FPS: -- | Ping: -- ms"
+StatsLabel.TextColor3 = Color3.fromRGB(0, 255, 150)
+StatsLabel.TextSize = 11
+StatsLabel.Font = Enum.Font.Code
+StatsLabel.ZIndex = 2
+
+local frameCount = 0
+local lastCheck = tick()
+RunService.RenderStepped:Connect(function()
+    frameCount = frameCount + 1
+    if tick() - lastCheck >= 1 then
+        local fps = math.floor(frameCount / (tick() - lastCheck))
+        local ping = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue())
+        StatsLabel.Text = string.format("FPS: %d | Ping: %d ms", fps, ping)
+        frameCount = 0
+        lastCheck = tick()
+    end
+end)
+
+-- Khung Scroll Dành Cho Mobile Khi Màn Hình Nhỏ
+local ScrollFrame = Instance.new("ScrollingFrame", MainFrame)
+ScrollFrame.Size = UDim2.new(1, 0, 1, -55)
+ScrollFrame.Position = UDim2.new(0, 0, 0, 55)
+ScrollFrame.BackgroundTransparency = 1
+ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 420)
+ScrollFrame.ScrollBarThickness = 4
+ScrollFrame.ZIndex = 2
+
+local Flags = {
+    AntiAFKJump = false,
+    FarmSafePlatform = false,
+    AutoSummer = false,
+    AntiSpectate = false,
+    FixLag = false
+}
+
+local function CreateToggleButton(name, pos, callback)
+    local Btn = Instance.new("TextButton", ScrollFrame)
+    Btn.Size = UDim2.new(0.9, 0, 0, IsMobile and 28 or 30)
+    Btn.Position = UDim2.new(0.05, 0, 0, pos)
+    Btn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+    Btn.BackgroundTransparency = 0.2
+    Btn.Text = name .. ": OFF"
+    Btn.TextColor3 = Color3.fromRGB(255, 100, 100)
+    Btn.Font = Enum.Font.SourceSansBold
+    Btn.TextSize = IsMobile and 11 or 12
+    Btn.ZIndex = 3
+    
+    local enabled = false
+    Btn.MouseButton1Click:Connect(function()
+        enabled = not enabled
+        Btn.Text = name .. ": " .. (enabled and "ON" or "OFF")
+        Btn.TextColor3 = enabled and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
+        callback(enabled)
+    end)
+end
+
+-- 1. Anti-AFK Nhảy 1s/Lần
+CreateToggleButton("Anti-AFK (Nhảy 1s/Lần)", 5, function(val)
+    Flags.AntiAFKJump = val
+    if Flags.AntiAFKJump then
+        task.spawn(function()
+            while Flags.AntiAFKJump do
+                task.wait(1)
+                pcall(function()
+                    local char = LocalPlayer.Character
+                    local hum = char and char:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 then
+                        hum.Jump = true
+                    end
+                end)
+            end
+        end)
+    end
+end)
+
+-- 2. Safe Platform Farm Level
+local SafePlatform = nil
+CreateToggleButton("Farm Level (Tạo Sàn Safezone)", 40, function(val)
+    Flags.FarmSafePlatform = val
+    if Flags.FarmSafePlatform then
+        pcall(function()
+            if not SafePlatform or not SafePlatform.Parent then
+                SafePlatform = Instance.new("Part")
+                SafePlatform.Name = "EvadeSafePlatform"
+                SafePlatform.Size = Vector3.new(35, 2, 35)
+                SafePlatform.Position = Vector3.new(0, 3000, 0)
+                SafePlatform.Anchored = true
+                SafePlatform.Material = Enum.Material.SmoothPlastic
+                SafePlatform.Color = Color3.fromRGB(40, 40, 40)
+                SafePlatform.Parent = workspace
+            end
+        end)
+
+        task.spawn(function()
+            while Flags.FarmSafePlatform do
+                task.wait(0.3)
+                pcall(function()
+                    local char = LocalPlayer.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        hrp.CFrame = CFrame.new(0, 3004, 0)
+                    end
+                end)
+            end
+        end)
+    else
+        pcall(function()
+            if SafePlatform then
+                SafePlatform:Destroy()
+                SafePlatform = nil
+            end
+        end)
+    end
+end)
+
+-- 3. Auto Event Summer
+CreateToggleButton("Auto Event Summer", 75, function(val)
+    Flags.AutoSummer = val
+    if Flags.AutoSummer then
+        task.spawn(function()
+            while Flags.AutoSummer do
+                task.wait(0.4)
+                pcall(function()
+                    local char = LocalPlayer.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        for _, item in pairs(workspace:GetDescendants()) do
+                            if not Flags.AutoSummer then break end
+                            if item:IsA("BasePart") or item:IsA("MeshPart") then
+                                local name = item.Name:lower()
+                                if name:find("ticket") or name:find("summer") or name:find("token") or name:find("collect") or name:find("chocolate") or name:find("event") then
+                                    hrp.CFrame = item.CFrame + Vector3.new(0, 2, 0)
+                                    local prompt = item:FindFirstChildOfClass("ProximityPrompt") or item.Parent:FindFirstChildOfClass("ProximityPrompt")
+                                    if prompt then
+                                        fireproximityprompt(prompt)
+                                    end
+                                    task.wait(0.2)
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+        end)
+    end
+end)
+
+-- 4. Ẩn Thân (Anti-Spectate)
+CreateToggleButton("Ẩn Thân (Chặn Khóa Góc Nhìn)", 110, function(val)
+    Flags.AntiSpectate = val
+    if Flags.AntiSpectate then
+        task.spawn(function()
+            while Flags.AntiSpectate do
+                task.wait(0.3)
+                pcall(function()
+                    local char = LocalPlayer.Character
+                    if char then
+                        for _, part in pairs(char:GetChildren()) do
+                            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                                part.LocalTransparencyModifier = 1
+                            end
+                        end
+                    end
+                end)
+            end
+        end)
+    end
+end)
+
+-- 5. Fix Lag
+CreateToggleButton("Fix Lag (Tối Ưu Cho Mobile)", 145, function(val)
+    Flags.FixLag = val
+    if Flags.FixLag then
+        pcall(function()
+            settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+            for _, v in pairs(game:GetDescendants()) do
+                if v:IsA("Part") or v:IsA("MeshPart") then
+                    v.Material = Enum.Material.SmoothPlastic
+                elseif v:IsA("Decal") or v:IsA("Texture") then
+                    v:Destroy()
+                elseif v:IsA("ParticleEmitter") or v:IsA("Trail") then
+                    v.Enabled = false
+                end
+            end
+        end)
+    end
+end)
+
+-- TextBox Fake Stats
+local function CreateTextBox(placeholder, pos, onFocusLost)
+    local Box = Instance.new("TextBox", ScrollFrame)
+    Box.Size = UDim2.new(0.9, 0, 0, IsMobile and 28 or 30)
+    Box.Position = UDim2.new(0.05, 0, 0, pos)
+    Box.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    Box.BackgroundTransparency = 0.2
+    Box.PlaceholderText = placeholder
+    Box.Text = ""
+    Box.TextColor3 = Color3.fromRGB(255, 215, 0)
+    Box.PlaceholderColor3 = Color3.fromRGB(150, 150, 150)
+    Box.Font = Enum.Font.SourceSansBold
+    Box.TextSize = IsMobile and 11 or 12
+    Box.ZIndex = 3
+    
+    Box.FocusLost:Connect(function(enterPressed)
+        if enterPressed and Box.Text ~= "" then
+            onFocusLost(Box.Text)
+        end
+    end)
+end
+
+CreateTextBox("Fake Level...", 180, function(text)
+    local num = tonumber(text)
+    if num then
+        pcall(function()
+            if LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("Level") then
+                LocalPlayer.leaderstats.Level.Value = num
+            end
+            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+            if playerGui then
+                for _, v in pairs(playerGui:GetDescendants()) do
+                    if v:IsA("TextLabel") and (v.Name:lower():find("level") or v.Text:lower():find("lvl")) then
+                        v.Text = "LVL " .. tostring(num)
+                    end
+                end
+            end
+        end)
+    end
+end)
+
+CreateTextBox("Fake Tiền...", 215, function(text)
+    local num = tonumber(text)
+    if num then
+        pcall(function()
+            if LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("Tokens") then
+                LocalPlayer.leaderstats.Tokens.Value = num
+            end
+            local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+            if playerGui then
+                for _, v in pairs(playerGui:GetDescendants()) do
+                    if v:IsA("TextLabel") and (v.Name:lower():find("token") or v.Name:lower():find("money")) then
+                        v.Text = "$" .. tostring(num)
+                    end
+                end
+            end
+        end)
+    end
+end)
+
+-- Nút Server Hop
+local HopBtn = Instance.new("TextButton", ScrollFrame)
+HopBtn.Size = UDim2.new(0.9, 0, 0, IsMobile and 28 or 30)
+HopBtn.Position = UDim2.new(0.05, 0, 0, 250)
+HopBtn.BackgroundColor3 = Color3.fromRGB(120, 0, 0)
+HopBtn.BackgroundTransparency = 0.2
+HopBtn.Text = "Chuyển Server Ít Người"
+HopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+HopBtn.Font = Enum.Font.SourceSansBold
+HopBtn.TextSize = IsMobile and 11 or 12
+HopBtn.ZIndex = 3
+
+HopBtn.MouseButton1Click:Connect(function()
+    HopBtn.Text = "Đang tìm server..."
+    pcall(function()
+        local Api = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+        local Servers = HttpService:JSONDecode(game:HttpGet(Api))
+        for _, s in pairs(Servers.data) do
+            if s.playing < s.maxPlayers and s.id ~= game.JobId then
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, LocalPlayer)
+                break
+            end
+        end
+    end)
+end)
